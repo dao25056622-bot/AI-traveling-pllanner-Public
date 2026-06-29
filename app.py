@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta
 
 # 1. 시스템 핵심 인프라 설정
-client = genai.Client(api_key="AQ.Ab8RN6JK07McCLb4-NNqKYHw6B7qpbIXp_CGtLfzUBe9BbCBqA")
+client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 st.set_page_config(page_title="AI 개인 맞춤형 여행 최적화 에이전트", layout="wide")
 st.title("✈️ AI 개인 맞춤형 여행·맛집 최적화 시스템")
