@@ -5,7 +5,7 @@ from streamlit_folium import st_folium
 import json
 from datetime import datetime, timedelta
 
-# 1. 시스템 핵심 인프라 설정
+# 1. 시스템 핵심 인프라 설정 (스트림릿 클라우드 보안 규격 적용)
 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 st.set_page_config(page_title="AI 개인 맞춤형 여행 최적화 에이전트", layout="wide")
@@ -57,48 +57,72 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# 안전하게 JSON을 추출하는 공통 함수 정의
+def safe_parse_json(text):
+    text = text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    return json.loads(text)
+
 # 연계 확장 요청 처리 로직
 if st.session_state.extend_destination:
     target_dest = st.session_state.extend_destination
+    base_dest = st.session_state.current_destination
     st.session_state.extend_destination = None
     
-    with st.spinner(f"빅데이터 기반 {target_dest} 연계 광역 동선 최적화 시뮬레이션을 실행 중입니다..."):
+    valid_days = [item.get('day', 0) for item in st.session_state.timeline_data if item.get('name')] if st.session_state.timeline_data else []
+    start_day = max(valid_days) + 1 if valid_days else 1
+    
+    with st.spinner(f"기존 동선을 보존하며, {base_dest} 근교인 {target_dest} 연계 최적화 스케줄을 병합 중입니다..."):
         try:
             extend_prompt = f"""
-            당신은 광역 국가 연계 동선을 설계하는 전문 여행 컨설팅 엔진입니다.
-            기존 목적지 주변의 추천 연계 도시인 '{target_dest}'를 중심으로 3~4일간의 핵심 인텐시브 스케줄을 추가로 연산하십시오.
+            당신은 국가 간/도시 간 광역 동선을 설계하는 전문 여행 컨설팅 엔진입니다.
+            사용자는 현재 '{base_dest}' 여행을 마친 상태이거나 연계 확장을 원합니다. 
+            주변 추천 지역인 '{target_dest}'를 중심으로 Day {start_day}부터 Day {start_day + 2}까지 3일간의 상세 일정을 추가로 설계하십시오.
 
             [지침 사양]:
-            1. '{target_dest}' 지역의 아침, 점심, 저녁 실제 식당 상호명과 핵심 랜드마크를 Day 1부터 Day 3까지 조밀하게 구성하십시오. 모호한 표현은 절대 배제합니다.
-            2. 'detail' 필드에 핵심 시그니처 메뉴명과 단가, 'spot_story' 필드에 1~2문장의 압축 비하인드를 반드시 매핑하십시오.
+            1. 반드시 Day {start_day}부터 일정을 시작하도록 'day' 필드를 순서대로 지정하십시오. (예: {start_day}, {start_day+1}, {start_day+2})
+            2. '{target_dest}' 지역의 아침, 점심, 저녁 실제 식당 상호명과 핵심 랜드마크를 조밀하게 구성하십시오. 모호한 표현은 배제합니다.
+            3. 'detail' 필드에 핵심 시그니처 메뉴명과 단가, 'spot_story' 필드에 1~2문장의 압축 비하인드를 반드시 매핑하십시오.
 
             아래 프로토콜 규격에 부합하는 정제된 JSON 블록만 반환하십시오. 외부 서술은 생략합니다.
             {{
-              "tips": [{{"title": "광역 이동 팁", "content": "연계 이동 시 필수 유의사항 고도화 기술"}}],
+              "tips": [{{"title": "{target_dest} 이동 팁", "content": "광역 이동 시 필수 유의사항 고도화 기술"}}],
               "itinerary": [
                 {{
-                  "day": 1, "time": "12:00", "name": "실존 장소명", "lat": 위도숫자, "lng": 경도숫자,
+                  "day": {start_day}, "time": "12:00", "name": "실존 장소명", "lat": 위도숫자, "lng": 경도숫자,
                   "summary": "일정 구분", "spot_story": "1~2문장 압축 스토리.", "detail": "추천 메뉴 및 안내 상세"
                 }}
               ]
             }}
             """
             response = client.models.generate_content(model='gemini-2.5-flash', contents=extend_prompt)
-            json_part = response.text.split("```json")[1].split("```")[0].strip()
-            parsed_data = json.loads(json_part)
+            parsed_data = safe_parse_json(response.text)
             
-            st.session_state.timeline_data = parsed_data.get("itinerary", [])
-            st.session_state.tips_data = parsed_data.get("tips", [])
-            st.session_state.duration = 3
+            new_itinerary = parsed_data.get("itinerary", [])
+            new_tips = parsed_data.get("tips", [])
             
             if st.session_state.timeline_data:
-                first_item = st.session_state.timeline_data[0]
-                st.session_state.map_center = [first_item.get('lat', 20.0), first_item.get('lng', 0.0)]
+                filtered_old = [item for item in st.session_state.timeline_data if item.get('day', 0) < start_day and item.get('name')]
+                st.session_state.timeline_data = filtered_old + new_itinerary
+            else:
+                st.session_state.timeline_data = new_itinerary
+                
+            st.session_state.tips_data = st.session_state.tips_data + new_tips
+            
+            if st.session_state.timeline_data:
+                st.session_state.duration = max(item.get('day', start_day) for item in st.session_state.timeline_data)
+            
+            if new_itinerary:
+                first_new_item = new_itinerary[0]
+                st.session_state.map_center = [first_new_item.get('lat', 20.0), first_new_item.get('lng', 0.0)]
                 st.session_state.map_zoom = 12
             st.session_state.selected_loc = None
             st.rerun()
         except Exception as e:
-            st.error("연계 노드 연산 중 에러가 발생했습니다.")
+            st.error(f"연계 노드 연산 중 에러가 발생했습니다: {e}")
 
 # 2. 실시간 사용자 컨텍스트 수집 (사이드바 제어판)
 with st.sidebar:
@@ -193,8 +217,7 @@ if submit_button:
                 }}
                 """
                 response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-                json_part = response.text.split("```json")[1].split("```")[0].strip()
-                parsed_data = json.loads(json_part)
+                parsed_data = safe_parse_json(response.text)
                 
                 st.session_state.timeline_data = parsed_data.get("itinerary", [])
                 st.session_state.tips_data = parsed_data.get("tips", [])
@@ -206,11 +229,10 @@ if submit_button:
                 st.session_state.selected_loc = None
 
             except Exception as e:
-                st.error("실시간 서버 노드 연결 실패. 잠시 후 다시 시도해 주십시오.")
+                st.error(f"실시간 서버 노드 연결 실패. 원인: {e}")
 
 # 4. 종합 대시보드 렌더링 파트
 if st.session_state.timeline_data:
-    
     if st.session_state.tips_data:
         st.subheader("💡 실시간 여정 인텔리전스 가이드 북")
         with st.container(border=True):
@@ -231,7 +253,6 @@ if st.session_state.timeline_data:
         
         day_items = [item for item in st.session_state.timeline_data if item.get('day') == current_day]
         
-        # 📌 실질적인 일정이 존재하는지 검사 (껍데기 유령 데이터 필터링)
         has_valid_schedule = False
         if day_items:
             if any(item.get('name') for item in day_items):
@@ -240,8 +261,12 @@ if st.session_state.timeline_data:
         if not has_valid_schedule:
             st.info(f"✨ {current_day}일차에는 고정된 세부 스케줄이 없습니다.")
             
-            suggested_country = "영국 런던 (유로스타 연계)" if "프랑스" in st.session_state.current_destination or "파리" in st.session_state.current_destination else "근교 소도시 및 주변 국가"
-            if "일본" in st.session_state.current_destination or "오사카" in st.session_state.current_destination:
+            base_dest_lower = st.session_state.current_destination.lower()
+            suggested_country = "근교 소도시 및 주변 국가"
+            
+            if "프랑스" in base_dest_lower or "파리" in base_dest_lower:
+                suggested_country = "영국 런던 (유로스타 연계)"
+            elif "일본" in base_dest_lower or "오사카" in base_dest_lower or "도쿄" in base_dest_lower:
                 suggested_country = "교토·고베 광역 루트"
                 
             st.success(f"""
@@ -250,7 +275,6 @@ if st.session_state.timeline_data:
             현재 목적지의 핵심 거점 투어가 전반부에 성공적으로 배치되었습니다. {current_day}일차부터는 **{suggested_country}** 여정으로 확장하여 여행을 더 풍성하게 즐겨보시는 것을 추천합니다!
             """)
             
-            # 🎯 오타 수정한 구역 (버튼 핸들러)
             if st.button(f"🚀 {suggested_country} 연계 여정 즉시 짜기", use_container_width=True):
                 st.session_state.extend_destination = suggested_country
                 st.session_state.map_center = [20.0, 0.0]
@@ -293,26 +317,18 @@ if st.session_state.timeline_data:
                 with col_exp:
                     with st.expander("📄 추천 구성 가이드", expanded=is_active):
                         st.write(f"**📌 주요 개요:** {item.get('summary', '')}")
-                        
                         if item.get('spot_story'):
                             st.write(f"*🎬 **스토리 큐레이션:** {item.get('spot_story')}*")
-                            
                         st.write(item.get('detail', '가이드라인 분석 중'))
 
     with col_map:
         st.subheader(f"🗺️ 실시간 이동 경로 매핑 지오데이터 ({current_day}일차)")
-        
         active_day_locs = [l for l in st.session_state.timeline_data if l.get('day') == current_day]
 
         current_center = st.session_state.get("map_center", [20.0, 0.0])
         current_zoom = st.session_state.get("map_zoom", 2)
 
-        if (current_center is None or 
-            not isinstance(current_center, list) or 
-            len(current_center) < 2 or 
-            current_center[0] is None or 
-            current_center[1] is None):
-            
+        if (current_center is None or not isinstance(current_center, list) or len(current_center) < 2 or current_center[0] is None or current_center[1] is None):
             if active_day_locs and active_day_locs[0].get('lat') is not None:
                 current_center = [active_day_locs[0]['lat'], active_day_locs[0]['lng']]
                 current_zoom = 13
@@ -321,7 +337,6 @@ if st.session_state.timeline_data:
                 current_zoom = 5 if "프랑스" in st.session_state.current_destination else 2
 
         m = folium.Map(location=current_center, zoom_start=current_zoom)
-        
         day_coords = []
         for order, loc in enumerate(active_day_locs):
             loc_lat = loc.get('lat')
@@ -333,15 +348,14 @@ if st.session_state.timeline_data:
                 
                 is_selected = (loc_name == st.session_state.selected_loc)
                 marker_color = 'orange' if is_selected else 'blue'
-                
                 summary_text = loc.get('summary', '')
+                
                 popup_html = f"""
                 <div style='width:220px'>
                     <b>{order+1}. {loc_name}</b> ({loc.get('time', '')})<br>
                     <small style='color:teal; font-weight:bold;'>{summary_text}</small>
                 </div>
                 """
-                
                 folium.Marker(
                     location=pos,
                     popup=folium.Popup(popup_html, max_width=250),
@@ -350,19 +364,6 @@ if st.session_state.timeline_data:
                 ).add_to(m)
         
         if len(day_coords) > 1:
-            folium.PolyLine(
-                locations=day_coords, 
-                color="#06b6d4", 
-                weight=5, 
-                opacity=0.8,
-                tooltip="이동 최적화 경로"
-            ).add_to(m)
+            folium.PolyLine(locations=day_coords, color="#06b6d4", weight=5, opacity=0.8, tooltip="이동 최적화 경로").add_to(m)
         
-        st_folium(
-            m, 
-            width=750, 
-            height=580, 
-            key=f"fly_map_day_{current_day}",
-            center=current_center,
-            zoom=current_zoom
-        )
+        st_folium(m, width=750, height=580, key=f"fly_map_day_{current_day}", center=current_center, zoom=current_zoom)
